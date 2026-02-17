@@ -1,0 +1,10 @@
+{
+  "name": "katsuyou-academy-backend",
+  "version": "1.0.0",
+  "description": "Claude API backend for Katsuyō Academy",
+  "main": "api/claude.js",
+  "dependencies": {},
+  "engines": {
+    "node": ">=18.x"
+  }
+}
