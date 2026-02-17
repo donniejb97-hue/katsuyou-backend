@@ -45,6 +45,7 @@ export default async function handler(req, res) {
 
     if (!response.ok) {
       const errorText = await response.text();
+      console.error('Anthropic API error:', response.status, errorText);
       return res.status(response.status).json({ 
         error: 'API request failed',
         details: errorText
@@ -60,6 +61,7 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
+    console.error('Error:', error);
     return res.status(500).json({
       success: false,
       error: 'Internal server error',
