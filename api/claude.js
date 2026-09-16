@@ -28,10 +28,11 @@ const MODELS = [
 const ALLOWED_ORIGINS = [
   'https://katsuyoacademy.com',
   'https://www.katsuyoacademy.com',
+  // local development, served over http — NOT file://, which sends
+  // Origin: null and is deliberately not allowed
   'http://localhost:3000',
   'http://localhost:5500',
-  'http://127.0.0.1:5500',
-  'null'   // local file:// testing — browsers send the literal string "null"
+  'http://127.0.0.1:5500'
 ];
 
 // Conversation practice sessions can run long — cap how much history we'll
