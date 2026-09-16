@@ -2,10 +2,14 @@
 // Katsuyō Academy — Vercel backend for Claude AI features
 // File location in your Vercel project: /api/claude.js
 //
-// Frontend contract (unchanged — ai.js and sensei.js work as-is):
-//   POST { prompt: string, maxTokens: number }
-//   → { success: true,  feedback: string, usage: {...}, model: string }
-//   → { success: false, error: string }
+// Frontend contract:
+//   Legacy (ai.js, sensei.js — unchanged, still works):
+//     POST { prompt: string, maxTokens: number }
+//   New (talk.html — multi-turn conversation practice):
+//     POST { messages: [{ role: 'user'|'assistant', content: string }, ...],
+//            system: string (optional), maxTokens: number }
+//   Both shapes → { success: true,  feedback: string, usage: {...}, model: string }
+//                → { success: false, error: string }
 //
 // Requires env var ANTHROPIC_API_KEY set in Vercel project settings.
 // ============================================================================
@@ -28,6 +32,13 @@ const ALLOWED_ORIGINS = [
   'http://127.0.0.1:5500'
 ];
 
+// Conversation practice sessions can run long — cap how much history we'll
+// ever forward to the API so a runaway client can't run up the bill.
+const MAX_HISTORY_MESSAGES = 40;
+const MAX_MESSAGE_CHARS = 4000;
+const MAX_SYSTEM_CHARS = 4000;
+const MAX_PROMPT_CHARS = 8000;
+
 function setCors(req, res) {
   const origin = req.headers.origin;
   if (ALLOWED_ORIGINS.includes(origin)) {
@@ -37,7 +48,14 @@ function setCors(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-async function callClaude(model, prompt, maxTokens, apiKey) {
+async function callClaude(model, messages, system, maxTokens, apiKey) {
+  const body = {
+    model: model,
+    max_tokens: maxTokens,
+    messages: messages
+  };
+  if (system) body.system = system;
+
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -45,11 +63,7 @@ async function callClaude(model, prompt, maxTokens, apiKey) {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01'
     },
-    body: JSON.stringify({
-      model: model,
-      max_tokens: maxTokens,
-      messages: [{ role: 'user', content: prompt }]
-    })
+    body: JSON.stringify(body)
   });
 
   const data = await response.json();
@@ -65,6 +79,44 @@ function shouldFallback(status, data) {
   if (errType === 'not_found_error') return true;
   if (status === 400 && /model/i.test(errMsg)) return true; // bad model string
   return false;
+}
+
+// Build the Anthropic `messages` array + optional `system` string from
+// whichever request shape the caller used.
+function buildRequest(reqBody) {
+  const { prompt, messages, system, maxTokens } = reqBody || {};
+  const cappedTokens = Math.min(Math.max(parseInt(maxTokens, 10) || 500, 50), 2000);
+
+  if (Array.isArray(messages) && messages.length) {
+    const clean = messages
+      .filter(function (m) {
+        return m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim();
+      })
+      .slice(-MAX_HISTORY_MESSAGES)
+      .map(function (m) {
+        return { role: m.role, content: m.content.slice(0, MAX_MESSAGE_CHARS) };
+      });
+
+    if (!clean.length) return { error: 'messages[] had no valid entries' };
+    // Anthropic requires the message list to start with a user turn.
+    if (clean[0].role !== 'user') clean.unshift({ role: 'user', content: '(conversation start)' });
+
+    const cappedSystem = typeof system === 'string' && system.trim()
+      ? system.slice(0, MAX_SYSTEM_CHARS)
+      : undefined;
+
+    return { messages: clean, system: cappedSystem, maxTokens: cappedTokens };
+  }
+
+  if (typeof prompt === 'string' && prompt.trim()) {
+    return {
+      messages: [{ role: 'user', content: prompt.slice(0, MAX_PROMPT_CHARS) }],
+      system: undefined,
+      maxTokens: cappedTokens
+    };
+  }
+
+  return { error: 'Missing prompt or messages' };
 }
 
 export default async function handler(req, res) {
@@ -84,20 +136,16 @@ export default async function handler(req, res) {
     return res.status(500).json({ success: false, error: 'Server not configured' });
   }
 
-  const { prompt, maxTokens } = req.body || {};
-  if (!prompt || typeof prompt !== 'string') {
-    return res.status(400).json({ success: false, error: 'Missing prompt' });
+  const built = buildRequest(req.body);
+  if (built.error) {
+    return res.status(400).json({ success: false, error: built.error });
   }
-
-  // Basic sanity caps so a bad request can't run up the bill
-  const cappedTokens = Math.min(Math.max(parseInt(maxTokens, 10) || 500, 50), 2000);
-  const cappedPrompt = prompt.slice(0, 8000);
 
   let lastError = 'Unknown error';
 
   for (const model of MODELS) {
     try {
-      const { ok, status, data } = await callClaude(model, cappedPrompt, cappedTokens, apiKey);
+      const { ok, status, data } = await callClaude(model, built.messages, built.system, built.maxTokens, apiKey);
 
       if (ok) {
         const text = (data.content || [])
