@@ -29,7 +29,9 @@ const ALLOWED_ORIGINS = [
   'https://katsuyoacademy.com',
   'https://www.katsuyoacademy.com',
   'http://localhost:3000',
-  'http://127.0.0.1:5500'
+  'http://localhost:5500',
+  'http://127.0.0.1:5500',
+  'null'   // local file:// testing — browsers send the literal string "null"
 ];
 
 // Conversation practice sessions can run long — cap how much history we'll
