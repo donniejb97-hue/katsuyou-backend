@@ -131,7 +131,12 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     try {
       const voices = await getJapaneseVoices(key, region);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      // Deliberately NOT a public cache. Opening this URL in a browser sends no
+      // Origin, so the response carries no Access-Control-Allow-Origin — and a
+      // shared cache would then serve that header-less copy to the site's own
+      // fetch, which the browser blocks. Vary:Origin should prevent it; not
+      // relying on that. The 24h in-instance cache already spares Azure.
+      res.setHeader('Cache-Control', 'private, max-age=3600');
       return res.status(200).json({ success: true, voices, default: DEFAULT_VOICE });
     } catch (err) {
       console.error('voice list error:', err.message);
