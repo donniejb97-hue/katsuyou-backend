@@ -143,7 +143,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const { text, voice } = req.body || {};
+  const { text, voice, style } = req.body || {};
   if (typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ success: false, error: 'Missing text' });
   }
@@ -160,24 +160,42 @@ export default async function handler(req, res) {
   bucket.count++;
   bucket.chars += clean.length;
 
-  // ---- voice ----------------------------------------------------------
+  // ---- voice and speaking style ---------------------------------------
+  // A style is only valid for voices that advertise it — ja-JP-NanamiNeural
+  // is currently the only Japanese voice with any. Asking for one a voice
+  // doesn't have is the kind of thing that fails silently, so the style is
+  // checked against that voice's own list and dropped if it isn't there.
   let chosen = DEFAULT_VOICE;
+  let chosenStyle = '';
+  let voiceList = null;
+
+  try {
+    voiceList = await getJapaneseVoices(key, region);
+  } catch (e) {
+    voiceList = null;   // verification unavailable; fall back to pattern checks
+  }
+
   if (typeof voice === 'string' && VOICE_PATTERN.test(voice)) {
-    try {
-      const voices = await getJapaneseVoices(key, region);
-      if (voices.some(v => v.name === voice)) chosen = voice;
-    } catch (e) {
-      // Can't verify — the pattern check above already limits this to a
-      // ja-JP neural name, so fall through with the requested voice.
-      chosen = voice;
+    if (!voiceList || voiceList.some(v => v.name === voice)) chosen = voice;
+  }
+
+  if (typeof style === 'string' && /^[a-zA-Z-]{1,40}$/.test(style)) {
+    const entry = voiceList && voiceList.find(v => v.name === chosen);
+    // No list means no way to verify, so no style — better plain than broken.
+    if (entry && Array.isArray(entry.styles) && entry.styles.indexOf(style) !== -1) {
+      chosenStyle = style;
     }
   }
 
+  const inner = '<prosody rate="-8%">' + escapeXml(clean) + '</prosody>';
+  const body = chosenStyle
+    ? '<mstts:express-as style="' + escapeXml(chosenStyle) + '">' + inner + '</mstts:express-as>'
+    : inner;
+
   const ssml =
-    '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="ja-JP">' +
-      '<voice name="' + chosen + '">' +
-        '<prosody rate="-8%">' + escapeXml(clean) + '</prosody>' +
-      '</voice>' +
+    '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis"' +
+      ' xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="ja-JP">' +
+      '<voice name="' + chosen + '">' + body + '</voice>' +
     '</speak>';
 
   try {
