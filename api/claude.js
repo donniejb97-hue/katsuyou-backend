@@ -88,7 +88,10 @@ function shouldFallback(status, data) {
 // whichever request shape the caller used.
 function buildRequest(reqBody) {
   const { prompt, messages, system, maxTokens } = reqBody || {};
-  const cappedTokens = Math.min(Math.max(parseInt(maxTokens, 10) || 500, 50), 2000);
+  // 3000, not 2000: an N1 reading passage plus its five questions and word
+  // list comes back as ONE JSON reply of roughly 2600 tokens. Capped lower, the
+  // JSON is cut off mid-string and the page can only report a garbled story.
+  const cappedTokens = Math.min(Math.max(parseInt(maxTokens, 10) || 500, 50), 3000);
 
   if (Array.isArray(messages) && messages.length) {
     const clean = messages
