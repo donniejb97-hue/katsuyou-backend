@@ -26,8 +26,19 @@ const ALLOWED_ORIGINS = [
 ];
 
 // Azure bills Japanese at TWO characters each, so this cap is half what it
-// looks like in spend terms. A conversational reply is ~40 characters.
+// looks like in spend terms. A word or reading is ~40 characters; a Katsu
+// reply read aloud (the `lang` path) runs a few hundred, so that path gets a
+// larger cap. Either way an over-long text is cut at a sentence end, never
+// mid-word.
 const MAX_CHARS = 400;
+const MAX_REPLY_CHARS = 2000;
+
+function clip(text, max) {
+  if (text.length <= max) return text;
+  const head = text.slice(0, max);
+  const cut = Math.max(head.lastIndexOf('。'), head.lastIndexOf('. '), head.lastIndexOf('！'), head.lastIndexOf('! '), head.lastIndexOf('？'), head.lastIndexOf('? '), head.lastIndexOf('\n'));
+  return (cut >= max / 2 ? head.slice(0, cut + 1) : head).trim();
+}
 
 // Only ja-JP neural voices, and only names shaped the way Azure names them.
 // Belt and braces: the name is also checked against the live voice list.
@@ -53,7 +64,7 @@ const OUTPUT_FORMAT = 'audio-24khz-48kbitrate-mono-mp3';
 // ---------------------------------------------------------------------------
 const RATE_WINDOW_MS = 60 * 1000;
 const RATE_MAX_REQUESTS = 20;      // per IP per minute
-const RATE_MAX_CHARS = 4000;       // per IP per minute
+const RATE_MAX_CHARS = 12000;      // per IP per minute — a handful of read-aloud replies
 const buckets = new Map();
 
 function rateLimit(ip) {
@@ -200,7 +211,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ success: false, error: 'Missing text' });
   }
 
-  const clean = text.trim().slice(0, MAX_CHARS);
+  const clean = clip(text.trim(), LANG_VOICES[lang] ? MAX_REPLY_CHARS : MAX_CHARS);
 
   // ---- rate limit -----------------------------------------------------
   const ip = clientIp(req);
