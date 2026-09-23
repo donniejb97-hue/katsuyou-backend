@@ -7,7 +7,8 @@
 //
 // Two jobs:
 //   GET  /api/tts?voices=1   → the live ja-JP voice list (cached 24h)
-//   POST /api/tts {text, voice} → audio/mpeg
+//   POST /api/tts {text, voice, style} → audio/mpeg   (Japanese)
+//   POST /api/tts {text, lang: en|de|fr|zh} → audio/mpeg   (Katsu's replies)
 //
 // Requires these env vars in Vercel project settings:
 //   AZURE_SPEECH_KEY     — Key 1 from the resource's "Keys and Endpoint" page
@@ -30,6 +31,16 @@ const MAX_CHARS = 400;
 // Belt and braces: the name is also checked against the live voice list.
 const VOICE_PATTERN = /^ja-JP-[A-Za-z0-9]+(Neural|HD|HDLatest)$/;
 const DEFAULT_VOICE = 'ja-JP-NanamiNeural';
+
+// Katsu reads his replies aloud in the site's language, so the other four
+// languages get one fixed, known-good voice each. `lang` in the request picks
+// it; anything not on this list falls through to the Japanese path above.
+const LANG_VOICES = {
+  en: { locale: 'en-US', voice: 'en-US-JennyNeural' },
+  de: { locale: 'de-DE', voice: 'de-DE-KatjaNeural' },
+  fr: { locale: 'fr-FR', voice: 'fr-FR-DeniseNeural' },
+  zh: { locale: 'zh-CN', voice: 'zh-CN-XiaoxiaoNeural' }
+};
 
 const OUTPUT_FORMAT = 'audio-24khz-48kbitrate-mono-mp3';
 
@@ -148,7 +159,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const { text, voice, style } = req.body || {};
+  const { text, voice, style, lang } = req.body || {};
   if (typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ success: false, error: 'Missing text' });
   }
@@ -173,18 +184,28 @@ export default async function handler(req, res) {
   let chosen = DEFAULT_VOICE;
   let chosenStyle = '';
   let voiceList = null;
+  let xmlLang = 'ja-JP';
 
-  try {
-    voiceList = await getJapaneseVoices(key, region);
-  } catch (e) {
-    voiceList = null;   // verification unavailable; fall back to pattern checks
+  // A non-Japanese language: one fixed voice, no style, no user choice.
+  const other = (typeof lang === 'string' && lang !== 'ja') ? LANG_VOICES[lang] : null;
+  if (other) {
+    chosen = other.voice;
+    xmlLang = other.locale;
   }
 
-  if (typeof voice === 'string' && VOICE_PATTERN.test(voice)) {
-    if (!voiceList || voiceList.some(v => v.name === voice)) chosen = voice;
+  if (!other) {
+    try {
+      voiceList = await getJapaneseVoices(key, region);
+    } catch (e) {
+      voiceList = null;   // verification unavailable; fall back to pattern checks
+    }
+
+    if (typeof voice === 'string' && VOICE_PATTERN.test(voice)) {
+      if (!voiceList || voiceList.some(v => v.name === voice)) chosen = voice;
+    }
   }
 
-  if (typeof style === 'string' && /^[a-zA-Z-]{1,40}$/.test(style)) {
+  if (!other && typeof style === 'string' && /^[a-zA-Z-]{1,40}$/.test(style)) {
     const entry = voiceList && voiceList.find(v => v.name === chosen);
     // No list means no way to verify, so no style — better plain than broken.
     if (entry && Array.isArray(entry.styles) && entry.styles.indexOf(style) !== -1) {
@@ -192,14 +213,14 @@ export default async function handler(req, res) {
     }
   }
 
-  const inner = '<prosody rate="-8%">' + escapeXml(clean) + '</prosody>';
+  const inner = other ? escapeXml(clean) : '<prosody rate="-8%">' + escapeXml(clean) + '</prosody>';
   const body = chosenStyle
     ? '<mstts:express-as style="' + escapeXml(chosenStyle) + '">' + inner + '</mstts:express-as>'
     : inner;
 
   const ssml =
     '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis"' +
-      ' xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="ja-JP">' +
+      ' xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="' + xmlLang + '">' +
       '<voice name="' + chosen + '">' + body + '</voice>' +
     '</speak>';
 
