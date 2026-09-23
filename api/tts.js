@@ -8,7 +8,9 @@
 // Two jobs:
 //   GET  /api/tts?voices=1   → the live ja-JP voice list (cached 24h)
 //   POST /api/tts {text, voice, style} → audio/mpeg   (Japanese)
-//   POST /api/tts {text, lang: en|de|fr|zh} → audio/mpeg   (Katsu's replies)
+//   GET  /api/tts?voices=1&lang=en   → that language's voice list
+//   POST /api/tts {text, lang: en|de|fr|zh, voice?, jaVoice?} → audio/mpeg
+//        (Katsu's replies: Japanese runs inside the text get jaVoice)
 //
 // Requires these env vars in Vercel project settings:
 //   AZURE_SPEECH_KEY     — Key 1 from the resource's "Keys and Endpoint" page
@@ -100,29 +102,60 @@ function escapeXml(s) {
 // ---------------------------------------------------------------------------
 // Voice list, cached in the instance so we're not fetching it per request.
 // ---------------------------------------------------------------------------
-let voiceCache = { at: 0, list: null };
+const voiceCache = {};            // locale → { at, list }
 const VOICE_TTL_MS = 24 * 60 * 60 * 1000;
 
-async function getJapaneseVoices(key, region) {
-  if (voiceCache.list && Date.now() - voiceCache.at < VOICE_TTL_MS) {
-    return voiceCache.list;
-  }
+// The live voice list for one locale, cached a day. The default is Japanese;
+// Katsu's read-aloud asks for the site language's list to offer a choice.
+async function getVoices(key, region, locale) {
+  locale = locale || 'ja-JP';
+  const hit = voiceCache[locale];
+  if (hit && hit.list && Date.now() - hit.at < VOICE_TTL_MS) return hit.list;
   const r = await fetch(
     'https://' + region + '.tts.speech.microsoft.com/cognitiveservices/voices/list',
     { headers: { 'Ocp-Apim-Subscription-Key': key } }
   );
   if (!r.ok) throw new Error('voice list failed: HTTP ' + r.status);
   const all = await r.json();
-  const list = (all || [])
-    .filter(v => v && v.Locale === 'ja-JP')
-    .map(v => ({
-      name: v.ShortName,
-      display: v.LocalName || v.DisplayName || v.ShortName,
-      gender: v.Gender || '',
-      styles: v.StyleList || []
-    }));
-  voiceCache = { at: Date.now(), list: list };
-  return list;
+  // One fetch fills every locale we serve, so the other lists are free.
+  const wanted = ['ja-JP'].concat(Object.values(LANG_VOICES).map(v => v.locale));
+  wanted.forEach(loc => {
+    const list = (all || [])
+      .filter(v => v && v.Locale === loc)
+      .map(v => ({
+        name: v.ShortName,
+        display: v.LocalName || v.DisplayName || v.ShortName,
+        gender: v.Gender || '',
+        styles: v.StyleList || []
+      }));
+    voiceCache[loc] = { at: Date.now(), list: list };
+  });
+  return (voiceCache[locale] && voiceCache[locale].list) || [];
+}
+const getJapaneseVoices = (key, region) => getVoices(key, region, 'ja-JP');
+
+// Azure names voices "<locale>-<Name>Neural"; this is the shape check for any
+// locale we serve, before the name is also checked against the live list.
+function voicePatternFor(locale) {
+  return new RegExp('^' + locale.replace('-', '\\-') + '-[A-Za-z0-9]+(Neural|HD|HDLatest)$');
+}
+
+// Katsu's replies mix languages: "食べる means to eat". Read by one English
+// voice, the Japanese is sounded out letter by letter; so the text is split
+// into runs by script, and each run gets its own <voice>. Azure allows
+// several <voice> elements in one <speak>, so this is still one clip.
+const JA_RUN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\u3000-\u303f\uff01-\uff0f\uff1a-\uff1f]+/g;
+function splitByScript(text) {
+  const runs = [];
+  let last = 0, m;
+  JA_RUN.lastIndex = 0;
+  while ((m = JA_RUN.exec(text)) !== null) {
+    if (m.index > last) runs.push({ ja: false, text: text.slice(last, m.index) });
+    runs.push({ ja: true, text: m[0] });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) runs.push({ ja: false, text: text.slice(last) });
+  return runs.filter(r => r.text.trim());
 }
 
 export default async function handler(req, res) {
@@ -141,14 +174,17 @@ export default async function handler(req, res) {
   // ---- voice list -----------------------------------------------------
   if (req.method === 'GET') {
     try {
-      const voices = await getJapaneseVoices(key, region);
+      const q = (req.query && req.query.lang) || '';
+      const loc = (typeof q === 'string' && LANG_VOICES[q]) ? LANG_VOICES[q].locale : 'ja-JP';
+      const voices = await getVoices(key, region, loc);
       // Deliberately NOT a public cache. Opening this URL in a browser sends no
       // Origin, so the response carries no Access-Control-Allow-Origin — and a
       // shared cache would then serve that header-less copy to the site's own
       // fetch, which the browser blocks. Vary:Origin should prevent it; not
       // relying on that. The 24h in-instance cache already spares Azure.
       res.setHeader('Cache-Control', 'private, max-age=3600');
-      return res.status(200).json({ success: true, voices, default: DEFAULT_VOICE });
+      const def = loc === 'ja-JP' ? DEFAULT_VOICE : Object.values(LANG_VOICES).find(v => v.locale === loc).voice;
+      return res.status(200).json({ success: true, voices, default: def });
     } catch (err) {
       console.error('voice list error:', err.message);
       return res.status(502).json({ success: false, error: 'Could not list voices' });
@@ -159,7 +195,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const { text, voice, style, lang } = req.body || {};
+  const { text, voice, style, lang, jaVoice } = req.body || {};
   if (typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ success: false, error: 'Missing text' });
   }
@@ -186,11 +222,24 @@ export default async function handler(req, res) {
   let voiceList = null;
   let xmlLang = 'ja-JP';
 
-  // A non-Japanese language: one fixed voice, no style, no user choice.
+  // A non-Japanese language: that locale's default voice, or one the user
+  // picked from that locale's list (checked by shape and against the list).
+  // Any Japanese runs inside the text get a Japanese voice of their own.
   const other = (typeof lang === 'string' && lang !== 'ja') ? LANG_VOICES[lang] : null;
+  let jaChosen = DEFAULT_VOICE;
   if (other) {
     chosen = other.voice;
     xmlLang = other.locale;
+    let otherList = null;
+    try { otherList = await getVoices(key, region, other.locale); } catch (e) { otherList = null; }
+    if (typeof voice === 'string' && voicePatternFor(other.locale).test(voice)) {
+      if (!otherList || otherList.some(v => v.name === voice)) chosen = voice;
+    }
+    let jaList = null;
+    try { jaList = await getJapaneseVoices(key, region); } catch (e) { jaList = null; }
+    if (typeof jaVoice === 'string' && VOICE_PATTERN.test(jaVoice)) {
+      if (!jaList || jaList.some(v => v.name === jaVoice)) jaChosen = jaVoice;
+    }
   }
 
   if (!other) {
@@ -213,15 +262,23 @@ export default async function handler(req, res) {
     }
   }
 
-  const inner = other ? escapeXml(clean) : '<prosody rate="-8%">' + escapeXml(clean) + '</prosody>';
-  const body = chosenStyle
-    ? '<mstts:express-as style="' + escapeXml(chosenStyle) + '">' + inner + '</mstts:express-as>'
-    : inner;
+  let voices;
+  if (other) {
+    voices = splitByScript(clean).map(run => run.ja
+      ? '<voice name="' + jaChosen + '"><prosody rate="-8%">' + escapeXml(run.text) + '</prosody></voice>'
+      : '<voice name="' + chosen + '">' + escapeXml(run.text) + '</voice>').join('');
+  } else {
+    const inner = '<prosody rate="-8%">' + escapeXml(clean) + '</prosody>';
+    const body = chosenStyle
+      ? '<mstts:express-as style="' + escapeXml(chosenStyle) + '">' + inner + '</mstts:express-as>'
+      : inner;
+    voices = '<voice name="' + chosen + '">' + body + '</voice>';
+  }
 
   const ssml =
     '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis"' +
       ' xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="' + xmlLang + '">' +
-      '<voice name="' + chosen + '">' + body + '</voice>' +
+      voices +
     '</speak>';
 
   try {
